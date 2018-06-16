@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use App\Couple;
-use App\User;
-use Illuminate\Http\Request;
+use DB;
 use Storage;
+use App\User;
+use App\Couple;
+use Illuminate\Http\Request;
+use App\Http\Requests\Users\UpdateRequest;
 
 class UsersController extends Controller
 {
@@ -34,23 +36,16 @@ class UsersController extends Controller
     /**
      * Display the specified User.
      *
-     * @param  \App\User  $user
+     * @param \App\User $user
+     *
      * @return \Illuminate\Http\Response
      */
     public function show(User $user)
     {
-        $usersMariageList = [];
-        foreach ($user->couples as $spouse) {
-            $usersMariageList[$spouse->pivot->id] = $user->name.' & '.$spouse->name;
-        }
-
-        $allMariageList = [];
-        foreach (Couple::with('husband', 'wife')->get() as $couple) {
-            $allMariageList[$couple->id] = $couple->husband->name.' & '.$couple->wife->name;
-        }
-
-        $malePersonList = User::where('gender_id', 1)->pluck('nickname', 'id');
-        $femalePersonList = User::where('gender_id', 2)->pluck('nickname', 'id');
+        $usersMariageList = $this->getUserMariageList($user);
+        $allMariageList = $this->getAllMariageList();
+        $malePersonList = $this->getPersonList(1);
+        $femalePersonList = $this->getPersonList(2);
 
         return view('users.show', [
             'user'             => $user,
@@ -64,7 +59,8 @@ class UsersController extends Controller
     /**
      * Display the user's family chart.
      *
-     * @param  \App\User  $user
+     * @param \App\User $user
+     *
      * @return \Illuminate\Http\Response
      */
     public function chart(User $user)
@@ -87,8 +83,10 @@ class UsersController extends Controller
     }
 
     /**
-     * Show user family tree
-     * @param  User   $user
+     * Show user family tree.
+     *
+     * @param \App\User $user
+     *
      * @return \Illuminate\Http\Response
      */
     public function tree(User $user)
@@ -99,38 +97,33 @@ class UsersController extends Controller
     /**
      * Show the form for editing the specified User.
      *
-     * @param  \App\User  $user
+     * @param \App\User $user
+     *
      * @return \Illuminate\Http\Response
      */
     public function edit(User $user)
     {
         $this->authorize('edit', $user);
 
-        return view('users.edit', compact('user'));
+        $replacementUsers = [];
+        if (request('action') == 'delete') {
+            $replacementUsers = $this->getPersonList($user->gender_id);
+        }
+
+        return view('users.edit', compact('user', 'replacementUsers'));
     }
 
     /**
      * Update the specified User in storage.
      *
-     * @param  \Illuminate\Http\Request  $request
-     * @param  \App\User  $user
+     * @param \App\Http\Requests\Users\UpdateRequest $request
+     * @param \App\User                $user
+     *
      * @return \Illuminate\Http\Response
      */
-    public function update(Request $request, User $user)
+    public function update(UpdateRequest $request, User $user)
     {
-        $this->validate($request, [
-            'nickname'  => 'required|string|max:255',
-            'name'      => 'required|string|max:255',
-            'gender_id' => 'required|numeric',
-            'dob'       => 'nullable|date|date_format:Y-m-d',
-            'dod'       => 'nullable|date|date_format:Y-m-d',
-            'yod'       => 'nullable|date_format:Y',
-            'phone'     => 'nullable|string|max:255',
-            'address'   => 'nullable|string|max:255',
-            'city'      => 'nullable|string|max:255',
-            'email'     => 'nullable|string|max:255',
-            'password'  => 'nullable|min:6|max:15',
-        ]);
+        $request->validated();
 
         $user->nickname = $request->nickname;
         $user->name = $request->get('name');
@@ -149,7 +142,7 @@ class UsersController extends Controller
         $user->city = $request->get('city');
         $user->email = $request->get('email');
 
-        if ($request->get('email')) {
+        if ($request->get('password')) {
             $user->password = bcrypt($request->get('password'));
         }
 
@@ -161,12 +154,40 @@ class UsersController extends Controller
     /**
      * Remove the specified User from storage.
      *
-     * @param  \App\User  $user
+     * @param \Illuminate\Http\Request $request
+     * @param \App\User                $user
+     *
      * @return \Illuminate\Http\Response
      */
-    public function destroy(User $user)
+    public function destroy(Request $request, User $user)
     {
-        //
+        $this->authorize('delete', $user);
+
+        if ($request->has('replace_delete_button')) {
+            $attributes = $request->validate([
+                'replacement_user_id' => 'required|exists:users,id',
+            ], [
+                'replacement_user_id.required' => __('validation.user.replacement_user_id.required'),
+            ]);
+
+            DB::beginTransaction();
+            $this->replaceUserOnUsersTable($user->id, $attributes['replacement_user_id']);
+            $this->replaceUserOnCouplesTable($user->id, $attributes['replacement_user_id']);
+            $user->delete();
+            DB::commit();
+
+            return redirect()->route('users.show', $attributes['replacement_user_id']);
+        }
+
+        request()->validate([
+            'user_id' => 'required',
+        ]);
+
+        if (request('user_id') == $user->id && $user->delete()) {
+            return redirect()->route('users.search');
+        }
+
+        return back();
     }
 
     /**
@@ -193,5 +214,85 @@ class UsersController extends Controller
         $user->save();
 
         return back();
+    }
+
+    /**
+     * Replace User Ids on users table.
+     *
+     * @param string $oldUserId
+     * @param string $replacementUserId
+     *
+     * @return void
+     */
+    private function replaceUserOnUsersTable($oldUserId, $replacementUserId)
+    {
+        foreach (['father_id', 'mother_id', 'manager_id'] as $field) {
+            DB::table('users')->where($field, $oldUserId)->update([
+                $field => $replacementUserId,
+            ]);
+        }
+    }
+
+    /**
+     * Replace User Ids on couples table.
+     *
+     * @param string $oldUserId
+     * @param string $replacementUserId
+     *
+     * @return void
+     */
+    private function replaceUserOnCouplesTable($oldUserId, $replacementUserId)
+    {
+        foreach (['husband_id', 'wife_id', 'manager_id'] as $field) {
+            DB::table('couples')->where($field, $oldUserId)->update([
+                $field => $replacementUserId,
+            ]);
+        }
+    }
+
+    /**
+     * Get User list based on gender.
+     *
+     * @param int $genderId
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    private function getPersonList(int $genderId)
+    {
+        return User::where('gender_id', $genderId)->pluck('nickname', 'id');
+    }
+
+    /**
+     * Get marriage list of a user.
+     *
+     * @param \App\User $user
+     *
+     * @return array
+     */
+    private function getUserMariageList(User $user)
+    {
+        $usersMariageList = [];
+
+        foreach ($user->couples as $spouse) {
+            $usersMariageList[$spouse->pivot->id] = $user->name.' & '.$spouse->name;
+        }
+
+        return $usersMariageList;
+    }
+
+    /**
+     * Get all marriage list.
+     *
+     * @return array
+     */
+    private function getAllMariageList()
+    {
+        $allMariageList = [];
+
+        foreach (Couple::with('husband', 'wife')->get() as $couple) {
+            $allMariageList[$couple->id] = $couple->husband->name.' & '.$couple->wife->name;
+        }
+
+        return $allMariageList;
     }
 }
