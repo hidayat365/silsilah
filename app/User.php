@@ -206,6 +206,8 @@ class User extends Authenticatable
                 }
 
             })
+            ->orderBy('dob', 'asc')
+            ->orderBy('id', 'asc')
             ->get();
     }
 
