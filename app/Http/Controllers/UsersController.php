@@ -150,7 +150,7 @@ class UsersController extends Controller
         $user->email = $request->get('email');
 
         if ($request->get('email')) {
-            $user->password = bcrypt($request->get('email'));
+            $user->password = bcrypt($request->get('password'));
         }
 
         $user->save();
